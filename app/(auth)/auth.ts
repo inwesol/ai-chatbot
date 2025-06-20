@@ -1,9 +1,7 @@
 import { compare } from 'bcrypt-ts';
 import NextAuth, { type User, type Session } from 'next-auth';
 import Credentials from 'next-auth/providers/credentials';
-
 import { getUser } from '@/lib/db/queries';
-
 import { authConfig } from './auth.config';
 // import GoogleProvider from "next-auth/providers/google";
 
@@ -88,6 +86,15 @@ export const {
         session.user.id = token.id as string;
       }
       return session;
+    },
+    async signOut(params) {
+      // Handle both session and token cases
+      if ('session' in params && params.session?.user?.email) {
+        console.log('SignOut event:', { user: params.session.user.email });
+      } else if ('token' in params && params.token?.email) {
+        console.log('SignOut event:', { user: params.token.email });
+      }
+      return true;
     },
   },
 });

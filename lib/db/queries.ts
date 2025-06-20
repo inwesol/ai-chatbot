@@ -1,10 +1,8 @@
 import 'server-only';
-
 import { genSaltSync, hashSync } from 'bcrypt-ts';
 import { and, asc, desc, eq, gt, gte, inArray, lt, SQL } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
-
 import {
   user,
   chat,
@@ -16,6 +14,8 @@ import {
   vote,
   type DBMessage,
   Chat,
+  passwordResetToken,
+  type PasswordResetToken,
 } from './schema';
 import { ArtifactKind } from '@/components/artifact';
 
@@ -36,32 +36,200 @@ export async function getUser(email: string): Promise<Array<User>> {
   }
 }
 
+export async function getUserById(id: string): Promise<User | null> {
+  try {
+    const [selectedUser] = await db.select().from(user).where(eq(user.id, id));
+    return selectedUser || null;
+  } catch (error) {
+    console.error('Failed to get user by id from database');
+    throw error;
+  }
+}
+
 export async function createUser(
   email: string,
-  password: string | null,
+  password: string | null = null,
   name?: string | null,
   image?: string | null
 ) {
   try {
-    const values: any = { email };
+    const values: any = { 
+      email,
+      createdAt: new Date()
+    };
     
     if (password) {
       const salt = genSaltSync(10);
       const hash = hashSync(password, salt);
       values.password = hash;
     }
-
+    
     if (name) {
       values.name = name;
     }
-
+    
     if (image) {
       values.image = image;
     }
 
-    return await db.insert(user).values(values);
+    const [newUser] = await db.insert(user).values(values).returning();
+    return newUser;
   } catch (error) {
     console.error('Failed to create user in database');
+    throw error;
+  }
+}
+
+export async function updateUser(
+  id: string,
+  updates: {
+    name?: string | null;
+    image?: string | null;
+    email?: string;
+  }
+) {
+  try {
+    const [updatedUser] = await db
+      .update(user)
+      .set({
+        ...updates,
+        updatedAt: new Date()
+      })
+      .where(eq(user.id, id))
+      .returning();
+    return updatedUser;
+  } catch (error) {
+    console.error('Failed to update user in database');
+    throw error;
+  }
+}
+
+export async function findOrCreateGoogleUser(
+  email: string,
+  name: string | null,
+  image: string | null
+): Promise<User> {
+  try {
+    // Check if user exists
+    const existingUsers = await getUser(email);
+    
+    if (existingUsers.length > 0) {
+      const existingUser = existingUsers[0];
+      
+      // Update user info if name or image has changed
+      if (existingUser.name !== name || existingUser.image !== image) {
+        const updatedUser = await updateUser(existingUser.id, {
+          name,
+          image
+        });
+        return updatedUser;
+      }
+      
+      return existingUser;
+    }
+    
+    // Create new user
+    const newUser = await createUser(email, null, name, image);
+    return newUser;
+  } catch (error) {
+    console.error('Failed to find or create Google user');
+    throw error;
+  }
+}
+
+// Password Reset Functions
+export async function createPasswordResetToken(userId: string): Promise<string> {
+  try {
+    // Generate a secure random token
+    const token = crypto.randomUUID() + crypto.randomUUID().replace(/-/g, '');
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour from now
+    
+    // Delete any existing tokens for this user
+    await db.delete(passwordResetToken).where(eq(passwordResetToken.userId, userId));
+    
+    // Create new token
+    await db.insert(passwordResetToken).values({
+      userId,
+      token,
+      expiresAt,
+      createdAt: new Date(),
+    });
+    
+    return token;
+  } catch (error) {
+    console.error('Failed to create password reset token');
+    throw error;
+  }
+}
+
+export async function getPasswordResetToken(token: string): Promise<PasswordResetToken | null> {
+  try {
+    const [resetToken] = await db
+      .select()
+      .from(passwordResetToken)
+      .where(eq(passwordResetToken.token, token))
+      .limit(1);
+    
+    return resetToken || null;
+  } catch (error) {
+    console.error('Failed to get password reset token');
+    throw error;
+  }
+}
+
+export async function deletePasswordResetToken(token: string) {
+  try {
+    return await db.delete(passwordResetToken).where(eq(passwordResetToken.token, token));
+  } catch (error) {
+    console.error('Failed to delete password reset token');
+    throw error;
+  }
+}
+
+export async function resetUserPassword(userId: string, newPassword: string): Promise<User> {
+  try {
+    const salt = genSaltSync(10);
+    const hash = hashSync(newPassword, salt);
+    
+    const [updatedUser] = await db
+      .update(user)
+      .set({ password: hash })
+      .where(eq(user.id, userId))
+      .returning();
+    
+    return updatedUser;
+  } catch (error) {
+    console.error('Failed to reset user password');
+    throw error;
+  }
+}
+
+export async function isPasswordResetTokenValid(token: string): Promise<boolean> {
+  try {
+    const resetToken = await getPasswordResetToken(token);
+    
+    if (!resetToken) {
+      return false;
+    }
+    
+    // Check if token has expired
+    const now = new Date();
+    return resetToken.expiresAt > now;
+  } catch (error) {
+    console.error('Failed to validate password reset token');
+    return false;
+  }
+}
+
+// Clean up expired tokens (should be run periodically)
+export async function cleanupExpiredPasswordResetTokens() {
+  try {
+    const now = new Date();
+    return await db
+      .delete(passwordResetToken)
+      .where(lt(passwordResetToken.expiresAt, now));
+  } catch (error) {
+    console.error('Failed to cleanup expired password reset tokens');
     throw error;
   }
 }
@@ -92,7 +260,6 @@ export async function deleteChatById({ id }: { id: string }) {
   try {
     await db.delete(vote).where(eq(vote.chatId, id));
     await db.delete(message).where(eq(message.chatId, id));
-
     return await db.delete(chat).where(eq(chat.id, id));
   } catch (error) {
     console.error('Failed to delete chat by id from database');
@@ -113,7 +280,6 @@ export async function getChatsByUserId({
 }) {
   try {
     const extendedLimit = limit + 1;
-
     const query = (whereCondition?: SQL<any>) =>
       db
         .select()
@@ -157,7 +323,6 @@ export async function getChatsByUserId({
     }
 
     const hasMore = filteredChats.length > limit;
-
     return {
       chats: hasMore ? filteredChats.slice(0, limit) : filteredChats,
       hasMore,
@@ -225,6 +390,7 @@ export async function voteMessage({
         .set({ isUpvoted: type === 'up' })
         .where(and(eq(vote.messageId, messageId), eq(vote.chatId, chatId)));
     }
+
     return await db.insert(vote).values({
       chatId,
       messageId,
@@ -280,7 +446,6 @@ export async function getDocumentsById({ id }: { id: string }) {
       .from(document)
       .where(eq(document.id, id))
       .orderBy(asc(document.createdAt));
-
     return documents;
   } catch (error) {
     console.error('Failed to get document by id from database');
@@ -295,7 +460,6 @@ export async function getDocumentById({ id }: { id: string }) {
       .from(document)
       .where(eq(document.id, id))
       .orderBy(desc(document.createdAt));
-
     return selectedDocument;
   } catch (error) {
     console.error('Failed to get document by id from database');
@@ -319,7 +483,6 @@ export async function deleteDocumentsByIdAfterTimestamp({
           gt(suggestion.documentCreatedAt, timestamp),
         ),
       );
-
     return await db
       .delete(document)
       .where(and(eq(document.id, id), gt(document.createdAt, timestamp)));
@@ -394,7 +557,6 @@ export async function deleteMessagesByChatIdAfterTimestamp({
         .where(
           and(eq(vote.chatId, chatId), inArray(vote.messageId, messageIds)),
         );
-
       return await db
         .delete(message)
         .where(
@@ -420,6 +582,63 @@ export async function updateChatVisiblityById({
     return await db.update(chat).set({ visibility }).where(eq(chat.id, chatId));
   } catch (error) {
     console.error('Failed to update chat visibility in database');
+    throw error;
+  }
+}
+
+// Additional utility functions for OAuth integration
+
+export async function linkProviderAccount({
+  userId,
+  provider,
+  providerAccountId,
+  accessToken,
+  refreshToken,
+}: {
+  userId: string;
+  provider: string;
+  providerAccountId: string;
+  accessToken?: string;
+  refreshToken?: string;
+}) {
+  try {
+    // This would require an accounts table if you want to track OAuth accounts
+    // For now, we're just updating the user's info when they sign in with Google
+    console.log('Provider account linked:', { userId, provider, providerAccountId });
+  } catch (error) {
+    console.error('Failed to link provider account');
+    throw error;
+  }
+}
+
+export async function deleteUser(id: string) {
+  try {
+    // Delete user's related data first
+    const userChats = await db.select({ id: chat.id }).from(chat).where(eq(chat.userId, id));
+    const chatIds = userChats.map(c => c.id);
+    
+    if (chatIds.length > 0) {
+      // Delete votes for user's chats
+      await db.delete(vote).where(inArray(vote.chatId, chatIds));
+      
+      // Delete messages for user's chats
+      await db.delete(message).where(inArray(message.chatId, chatIds));
+      
+      // Delete chats
+      await db.delete(chat).where(eq(chat.userId, id));
+    }
+    
+    // Delete user's documents and suggestions
+    await db.delete(suggestion).where(eq(suggestion.documentId, id));
+    await db.delete(document).where(eq(document.userId, id));
+    
+    // Delete user's password reset tokens
+    await db.delete(passwordResetToken).where(eq(passwordResetToken.userId, id));
+    
+    // Finally delete the user
+    return await db.delete(user).where(eq(user.id, id));
+  } catch (error) {
+    console.error('Failed to delete user from database');
     throw error;
   }
 }
