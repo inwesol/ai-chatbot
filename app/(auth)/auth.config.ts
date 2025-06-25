@@ -2,38 +2,43 @@ import type { NextAuthConfig } from 'next-auth';
 
 export const authConfig = {
   pages: {
+    // Set signIn to your custom login page
     signIn: '/login',
     newUser: '/',
     error: '/login',
   },
-  providers: [
-    // added later in auth.ts since it requires bcrypt which is only compatible with Node.js
-    // while this file is also used in non-Node.js environments
-  ],
+  providers: [],
   callbacks: {
     authorized({ auth, request: { nextUrl } }) {
       const isLoggedIn = !!auth?.user;
-      const isOnChat = nextUrl.pathname.startsWith('/');
       const isOnRegister = nextUrl.pathname.startsWith('/register');
       const isOnLogin = nextUrl.pathname.startsWith('/login');
-
-      if (isLoggedIn && (isOnLogin || isOnRegister)) {
-        return Response.redirect(new URL('/', nextUrl as unknown as URL));
+      const isOnForgotPassword = nextUrl.pathname.startsWith('/forgot-password');
+      const isOnResetPassword = nextUrl.pathname.startsWith('/reset-password');
+      const isOnVerifyEmail = nextUrl.pathname.startsWith('/verify-email');
+      const isOnAuth = nextUrl.pathname.startsWith('/api/auth');
+      
+      // Allow auth routes to pass through
+      if (isOnAuth) {
+        return true;
       }
-
-      if (isOnRegister || isOnLogin) {
-        return true; // Always allow access to register and login pages
+      
+      // Redirect logged-in users away from auth pages
+      if (isLoggedIn && (isOnLogin || isOnRegister || isOnForgotPassword || isOnResetPassword || isOnVerifyEmail)) {
+        return Response.redirect(new URL('/', nextUrl));
       }
-
-      if (isOnChat) {
-        if (isLoggedIn) return true;
-        return false; // Redirect unauthenticated users to login page
+      
+      // Allow access to public auth pages for non-authenticated users
+      if (isOnRegister || isOnLogin || isOnForgotPassword || isOnResetPassword || isOnVerifyEmail) {
+        return true;
       }
-
-      if (isLoggedIn) {
-        return Response.redirect(new URL('/', nextUrl as unknown as URL));
+      
+      // For all other routes, require authentication
+      if (!isLoggedIn) {
+        // Redirect to login but allow the OAuth flow to work
+        return false;
       }
-
+      
       return true;
     },
   },
